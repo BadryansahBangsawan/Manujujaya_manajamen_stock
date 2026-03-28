@@ -1,0 +1,32 @@
+{
+  "name": "server",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "tsdown",
+    "check-types": "tsc -b",
+    "compile": "bun build --compile --minify --sourcemap --bytecode ./src/index.ts --outfile server",
+    "dev": "bun run --hot src/index.ts",
+    "start": "bun run dist/index.mjs"
+  },
+  "dependencies": {
+    "@Manujujaya-Manajemen-stock/api": "workspace:*",
+    "@Manujujaya-Manajemen-stock/db": "workspace:*",
+    "@Manujujaya-Manajemen-stock/env": "workspace:*",
+    "@orpc/openapi": "catalog:",
+    "@orpc/server": "catalog:",
+    "@orpc/zod": "catalog:",
+    "cors": "^2.8.5",
+    "dotenv": "catalog:",
+    "express": "^5.1.0",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@Manujujaya-Manajemen-stock/config": "workspace:*",
+    "@types/bun": "catalog:",
+    "@types/cors": "^2.8.17",
+    "@types/express": "catalog:",
+    "tsdown": "^0.16.5",
+    "typescript": "^5"
+  }
+}
