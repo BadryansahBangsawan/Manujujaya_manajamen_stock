@@ -16,7 +16,19 @@ import {
   type UploadBatch,
 } from "./schema";
 
-const DEFAULT_DB_PATH = new URL("../local.db", import.meta.url).pathname;
+function resolveDefaultDbPath() {
+  try {
+    if (typeof import.meta !== "undefined" && typeof import.meta.url === "string" && import.meta.url.startsWith("file:")) {
+      return new URL("../local.db", import.meta.url).pathname;
+    }
+  } catch {
+    // ignore and fallback for non-file runtimes (e.g. Cloudflare Worker bundle)
+  }
+
+  return "./local.db";
+}
+
+const DEFAULT_DB_PATH = resolveDefaultDbPath();
 const DEMO_SUMMARY_PREFIX = "demo-sales";
 
 export type DatasetType = "master" | "sales_summary" | "sales_transaction";
@@ -245,7 +257,7 @@ function createId(prefix: string) {
   return `${prefix}_${crypto.randomUUID()}`;
 }
 
-async function insertInChunks<T>(table: any, rows: T[], chunkSize = 250) {
+async function insertInChunks<T>(table: any, rows: T[], chunkSize = 1) {
   for (let index = 0; index < rows.length; index += chunkSize) {
     await db.insert(table).values(rows.slice(index, index + chunkSize)).run();
   }

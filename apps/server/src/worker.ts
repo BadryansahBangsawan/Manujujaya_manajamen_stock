@@ -36,21 +36,47 @@ const apiHandler = new OpenAPIHandler(appRouter, {
 let runtimeConfigured = false;
 
 function parseAllowedOrigins(value?: string) {
-  return new Set(
-    (value ?? "http://localhost:3001,http://localhost:5173")
-      .split(",")
-      .map((origin) => origin.trim())
-      .filter(Boolean),
-  );
+  return (value ?? "http://localhost:3001,http://localhost:5173,https://*.workers.dev")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
 }
 
-function isOriginAllowed(origin: string | null, allowedOrigins: Set<string>) {
+function matchesWildcardOrigin(origin: string, rule: string) {
+  const hasProtocolWildcard = rule.startsWith("http://*.") || rule.startsWith("https://*.");
+  const hasHostWildcard = rule.startsWith("*.");
+  if (!hasProtocolWildcard && !hasHostWildcard) return false;
+
+  try {
+    const url = new URL(origin);
+    let expectedProtocol: string | null = null;
+    let wildcardHost = rule.replace("*.", "");
+
+    if (hasProtocolWildcard) {
+      const separatorIndex = rule.indexOf("://");
+      if (separatorIndex === -1) return false;
+      expectedProtocol = rule.slice(0, separatorIndex);
+      wildcardHost = rule.slice(separatorIndex + 3).replace("*.", "");
+    }
+
+    if (!wildcardHost) return false;
+    if (expectedProtocol && url.protocol !== `${expectedProtocol}:`) return false;
+
+    return url.hostname === wildcardHost || url.hostname.endsWith(`.${wildcardHost}`);
+  } catch {
+    return false;
+  }
+}
+
+function isOriginAllowed(origin: string | null, allowedOrigins: string[]) {
   if (!origin) return true;
-  if (allowedOrigins.has("*")) return true;
-  return allowedOrigins.has(origin);
+  if (allowedOrigins.includes("*")) return true;
+  if (allowedOrigins.includes(origin)) return true;
+
+  return allowedOrigins.some((rule) => matchesWildcardOrigin(origin, rule));
 }
 
-function buildCorsHeaders(origin: string | null, allowedOrigins: Set<string>) {
+function buildCorsHeaders(origin: string | null, allowedOrigins: string[]) {
   if (!isOriginAllowed(origin, allowedOrigins)) return new Headers();
 
   const headers = new Headers();
