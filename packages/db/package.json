@@ -10,7 +10,7 @@
     }
   },
   "scripts": {
-    "db:local": "turso dev --db-file local.db",
+    "db:local": "bun -e \"import { Database } from 'bun:sqlite'; const db = new Database('local.db', { create: true }); db.close(); console.log('SQLite ready at packages/db/local.db');\"",
     "db:push": "drizzle-kit push",
     "db:generate": "drizzle-kit generate",
     "db:studio": "drizzle-kit studio",

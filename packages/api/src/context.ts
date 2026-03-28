@@ -8,6 +8,7 @@ export async function createContext(opts: CreateContextOptions) {
   return {
     auth: null,
     session: null,
+    requestId: opts.req.headers["x-request-id"]?.toString() ?? crypto.randomUUID(),
   };
 }
 
