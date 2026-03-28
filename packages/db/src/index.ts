@@ -1,6 +1,7 @@
-import { Database } from "bun:sqlite";
+import { createClient, type Client as LibsqlClient } from "@libsql/client";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/bun-sqlite";
+import { drizzle as drizzleD1 } from "drizzle-orm/d1";
+import { drizzle as drizzleLibsql } from "drizzle-orm/libsql";
 
 import { demoInventoryItems, demoSummaryBatches, demoTransactionRecords } from "./demo-data";
 import {
@@ -114,24 +115,75 @@ type AnalysisComputation = {
   }>;
 };
 
-const sqlite = new Database(resolveSqlitePath(), { create: true });
-export const db = drizzle(sqlite, {
-  schema: {
-    uploadBatches,
-    inventoryItems,
-    salesSummaryRecords,
-    salesTransactionRecords,
-    analysisItems,
-    analysisSummary,
-  },
-});
+const schema = {
+  uploadBatches,
+  inventoryItems,
+  salesSummaryRecords,
+  salesTransactionRecords,
+  analysisItems,
+  analysisSummary,
+};
+
+type D1Binding = Parameters<typeof drizzleD1>[0];
+
+let configuredD1: D1Binding | null = null;
+let runtimeInitPromise: Promise<void> | null = null;
+let db: any;
+
+export function configureDatabase(options: { d1?: D1Binding | null; databaseUrl?: string } = {}) {
+  let shouldReinitialize = false;
+
+  if (options.databaseUrl) {
+    process.env.DATABASE_URL = options.databaseUrl;
+    shouldReinitialize = true;
+  }
+
+  const shouldReconfigure = options.d1 !== undefined && options.d1 !== configuredD1;
+  if (shouldReconfigure) {
+    configuredD1 = options.d1 ?? null;
+    shouldReinitialize = true;
+  }
+
+  if (shouldReinitialize) {
+    runtimeInitPromise = null;
+  }
+}
+
+async function ensureRuntimeReady() {
+  if (runtimeInitPromise) {
+    await runtimeInitPromise;
+    return;
+  }
+
+  runtimeInitPromise = (async () => {
+    if (configuredD1) {
+      db = drizzleD1(configuredD1, { schema });
+    } else {
+      const libsqlClient: LibsqlClient = createClient({ url: resolveSqlitePath() });
+      db = drizzleLibsql(libsqlClient, { schema });
+    }
+
+    await ensureDatabase();
+    if (!configuredD1) {
+      await seedDemoDataIfEmpty();
+    }
+    await refreshAnalysisSnapshot();
+  })();
+
+  try {
+    await runtimeInitPromise;
+  } catch (error) {
+    runtimeInitPromise = null;
+    throw error;
+  }
+}
 
 function resolveSqlitePath() {
   const raw = process.env.DATABASE_URL?.trim();
-  if (!raw) return DEFAULT_DB_PATH;
-  if (raw.startsWith("file:")) return raw.slice("file:".length);
-  if (raw.endsWith(".db") || raw.endsWith(".sqlite")) return raw;
-  return DEFAULT_DB_PATH;
+  if (!raw) return `file:${DEFAULT_DB_PATH}`;
+  if (raw.startsWith("file:")) return raw;
+  if (raw.endsWith(".db") || raw.endsWith(".sqlite")) return `file:${raw}`;
+  return `file:${DEFAULT_DB_PATH}`;
 }
 
 function nowIso() {
@@ -193,9 +245,9 @@ function createId(prefix: string) {
   return `${prefix}_${crypto.randomUUID()}`;
 }
 
-function insertInChunks<T>(table: any, rows: T[], chunkSize = 250) {
+async function insertInChunks<T>(table: any, rows: T[], chunkSize = 250) {
   for (let index = 0; index < rows.length; index += chunkSize) {
-    db.insert(table).values(rows.slice(index, index + chunkSize)).run();
+    await db.insert(table).values(rows.slice(index, index + chunkSize)).run();
   }
 }
 
@@ -319,25 +371,30 @@ function resolveValue(row: Record<string, unknown>, mapping: UploadMapping, fiel
   return row[sourceHeader] ?? null;
 }
 
-function maybeDeactivateDemoBatches(mode: UploadMode) {
+async function maybeDeactivateDemoBatches(mode: UploadMode) {
   const batchTypeFilter =
     mode === "master"
       ? eq(uploadBatches.datasetType, "master")
       : inArray(uploadBatches.datasetType, ["sales_summary", "sales_transaction"]);
-  const activeBatches = db
+  const activeBatches = await db
     .select()
     .from(uploadBatches)
     .where(and(batchTypeFilter, eq(uploadBatches.isActive, true)))
     .all();
 
-  if (activeBatches.length === 0 || activeBatches.some((batch) => !isDemoBatch(batch))) {
+  if (activeBatches.length === 0 || activeBatches.some((batch: UploadBatch) => !isDemoBatch(batch))) {
     return;
   }
 
-  db.update(uploadBatches).set({ isActive: false }).where(and(batchTypeFilter, eq(uploadBatches.isActive, true))).run();
+  await db
+    .update(uploadBatches)
+    .set({ isActive: false })
+    .where(and(batchTypeFilter, eq(uploadBatches.isActive, true)))
+    .run();
 }
 
-export function commitMasterUpload(payload: CommitPayload) {
+export async function commitMasterUpload(payload: CommitPayload) {
+  await ensureRuntimeReady();
   const preview = previewParsedFile(payload);
   if (preview.detectedDatasetType !== "master") {
     throw new Error("File master harus diupload sebagai dataset master.");
@@ -353,13 +410,14 @@ export function commitMasterUpload(payload: CommitPayload) {
     throw new Error(`Mapping master belum lengkap: ${missing.join(", ")}`);
   }
 
-  maybeDeactivateDemoBatches("master");
+  await maybeDeactivateDemoBatches("master");
 
   const batchId = createId("master");
   const validationSummary = { requiredFields: requiredFieldsFor("master"), missingFields: [] };
 
-  db.update(uploadBatches).set({ isActive: false }).where(eq(uploadBatches.datasetType, "master")).run();
-  db.insert(uploadBatches)
+  await db.update(uploadBatches).set({ isActive: false }).where(eq(uploadBatches.datasetType, "master")).run();
+  await db
+    .insert(uploadBatches)
     .values({
       id: batchId,
       datasetType: "master",
@@ -391,15 +449,16 @@ export function commitMasterUpload(payload: CommitPayload) {
     .filter((row) => row.itemCode && row.itemName);
 
   if (rows.length > 0) {
-    insertInChunks(inventoryItems, rows);
+    await insertInChunks(inventoryItems, rows);
   }
 
-  refreshAnalysisSnapshot();
+  await refreshAnalysisSnapshot();
 
   return { batchId, importedRows: rows.length };
 }
 
-export function commitSalesSummaryUpload(payload: CommitPayload) {
+export async function commitSalesSummaryUpload(payload: CommitPayload) {
+  await ensureRuntimeReady();
   const preview = previewParsedFile(payload);
   const periodStart = payload.periodStart ?? preview.inferredPeriodStart;
   const periodEnd = payload.periodEnd ?? preview.inferredPeriodEnd;
@@ -413,10 +472,11 @@ export function commitSalesSummaryUpload(payload: CommitPayload) {
     throw new Error(`Mapping sales summary belum lengkap: ${missing.join(", ")}`);
   }
 
-  maybeDeactivateDemoBatches("sales");
+  await maybeDeactivateDemoBatches("sales");
 
   const batchId = createId("sales_summary");
-  db.insert(uploadBatches)
+  await db
+    .insert(uploadBatches)
     .values({
       id: batchId,
       datasetType: "sales_summary",
@@ -450,21 +510,22 @@ export function commitSalesSummaryUpload(payload: CommitPayload) {
     .filter((row) => row.itemCode);
 
   if (rows.length > 0) {
-    insertInChunks(salesSummaryRecords, rows);
+    await insertInChunks(salesSummaryRecords, rows);
   }
 
-  refreshAnalysisSnapshot();
+  await refreshAnalysisSnapshot();
 
   return { batchId, importedRows: rows.length, periodStart, periodEnd };
 }
 
-export function commitSalesTransactionUpload(payload: CommitPayload) {
+export async function commitSalesTransactionUpload(payload: CommitPayload) {
+  await ensureRuntimeReady();
   const missing = requiredFieldsFor("sales_transaction").filter((field) => !payload.mapping[field]);
   if (missing.length > 0) {
     throw new Error(`Mapping sales transaction belum lengkap: ${missing.join(", ")}`);
   }
 
-  maybeDeactivateDemoBatches("sales");
+  await maybeDeactivateDemoBatches("sales");
 
   const parsedDates = payload.rows
     .map((row) => parseDate(resolveValue(row, payload.mapping, "sale_date")))
@@ -474,7 +535,8 @@ export function commitSalesTransactionUpload(payload: CommitPayload) {
   const periodEnd = parsedDates.length ? parsedDates.slice().sort().at(-1) ?? null : null;
 
   const batchId = createId("sales_transaction");
-  db.insert(uploadBatches)
+  await db
+    .insert(uploadBatches)
     .values({
       id: batchId,
       datasetType: "sales_transaction",
@@ -507,50 +569,56 @@ export function commitSalesTransactionUpload(payload: CommitPayload) {
     .filter((row) => row.itemCode);
 
   if (rows.length > 0) {
-    insertInChunks(salesTransactionRecords, rows);
+    await insertInChunks(salesTransactionRecords, rows);
   }
 
-  refreshAnalysisSnapshot();
+  await refreshAnalysisSnapshot();
 
   return { batchId, importedRows: rows.length, periodStart, periodEnd };
 }
 
-export function listUploadHistory() {
+export async function listUploadHistory() {
+  await ensureRuntimeReady();
   return db.select().from(uploadBatches).orderBy(desc(uploadBatches.uploadedAt)).all();
 }
 
-export function setActiveBatches(input: { masterBatchId?: string | null; salesBatchIds: string[] }) {
-  db.update(uploadBatches).set({ isActive: false }).where(eq(uploadBatches.datasetType, "master")).run();
-  db.update(uploadBatches)
+export async function setActiveBatches(input: { masterBatchId?: string | null; salesBatchIds: string[] }) {
+  await ensureRuntimeReady();
+  await db.update(uploadBatches).set({ isActive: false }).where(eq(uploadBatches.datasetType, "master")).run();
+  await db
+    .update(uploadBatches)
     .set({ isActive: false })
     .where(inArray(uploadBatches.datasetType, ["sales_summary", "sales_transaction"]))
     .run();
 
   if (input.masterBatchId) {
-    db.update(uploadBatches)
+    await db
+      .update(uploadBatches)
       .set({ isActive: true })
       .where(and(eq(uploadBatches.id, input.masterBatchId), eq(uploadBatches.datasetType, "master")))
       .run();
   }
 
   if (input.salesBatchIds.length > 0) {
-    db.update(uploadBatches)
+    await db
+      .update(uploadBatches)
       .set({ isActive: true })
       .where(inArray(uploadBatches.id, input.salesBatchIds))
       .run();
   }
 
-  refreshAnalysisSnapshot();
+  await refreshAnalysisSnapshot();
 
   return { success: true };
 }
 
-export function getBatchDetail(batchId: string) {
-  const batch = db.select().from(uploadBatches).where(eq(uploadBatches.id, batchId)).get();
+export async function getBatchDetail(batchId: string) {
+  await ensureRuntimeReady();
+  const batch = await db.select().from(uploadBatches).where(eq(uploadBatches.id, batchId)).get();
   if (!batch) throw new Error("Batch tidak ditemukan.");
 
   if (batch.datasetType === "master") {
-    const rows = db
+    const rows = await db
       .select()
       .from(inventoryItems)
       .where(eq(inventoryItems.batchId, batchId))
@@ -561,7 +629,7 @@ export function getBatchDetail(batchId: string) {
   }
 
   if (batch.datasetType === "sales_summary") {
-    const rows = db
+    const rows = await db
       .select()
       .from(salesSummaryRecords)
       .where(eq(salesSummaryRecords.batchId, batchId))
@@ -571,7 +639,7 @@ export function getBatchDetail(batchId: string) {
     return { batch, rows };
   }
 
-  const rows = db
+  const rows = await db
     .select()
     .from(salesTransactionRecords)
     .where(eq(salesTransactionRecords.batchId, batchId))
@@ -582,27 +650,28 @@ export function getBatchDetail(batchId: string) {
   return { batch, rows };
 }
 
-export function deleteBatch(batchId: string) {
-  const batch = db.select().from(uploadBatches).where(eq(uploadBatches.id, batchId)).get();
+export async function deleteBatch(batchId: string) {
+  await ensureRuntimeReady();
+  const batch = await db.select().from(uploadBatches).where(eq(uploadBatches.id, batchId)).get();
   if (!batch) {
     throw new Error("Batch tidak ditemukan.");
   }
 
-  db.delete(uploadBatches).where(eq(uploadBatches.id, batchId)).run();
-  refreshAnalysisSnapshot();
+  await db.delete(uploadBatches).where(eq(uploadBatches.id, batchId)).run();
+  await refreshAnalysisSnapshot();
 
   return { success: true, deletedBatchId: batchId };
 }
 
-function readSummaryRow(): AnalysisSummary | undefined {
+async function readSummaryRow(): Promise<AnalysisSummary | undefined> {
   return db.select().from(analysisSummary).get();
 }
 
-function readAnalysisItems(): AnalysisItem[] {
+async function readAnalysisItems(): Promise<AnalysisItem[]> {
   return db.select().from(analysisItems).all();
 }
 
-function buildFilteredItems(filters: ListFilters, items = readAnalysisItems()) {
+function buildFilteredItems(filters: ListFilters, items: AnalysisItem[]) {
   const search = filters.search?.trim().toLowerCase();
 
   const filtered = items.filter((item) => {
@@ -650,9 +719,10 @@ function buildFilteredItems(filters: ListFilters, items = readAnalysisItems()) {
   };
 }
 
-export function getDashboardSummary() {
-  const summary = readSummaryRow();
-  const items = readAnalysisItems();
+export async function getDashboardSummary() {
+  await ensureRuntimeReady();
+  const summary = await readSummaryRow();
+  const items = await readAnalysisItems();
   const urgentItems = items
     .filter((item) => item.purchasePriority === "High")
     .sort((left, right) => right.priorityScore - left.priorityScore)
@@ -670,9 +740,10 @@ export function getDashboardSummary() {
   return { summary, urgentItems };
 }
 
-export function getDashboardCharts() {
-  const items = readAnalysisItems();
-  const activeBatches = db
+export async function getDashboardCharts() {
+  await ensureRuntimeReady();
+  const items = await readAnalysisItems();
+  const activeBatches = await db
     .select()
     .from(uploadBatches)
     .where(eq(uploadBatches.isActive, true))
@@ -697,14 +768,16 @@ export function getDashboardCharts() {
     { label: "Dead", value: items.filter((item) => item.movementClass === "Dead Moving").length },
   ];
 
-  const summaryBatches = activeBatches.filter((batch) => batch.datasetType === "sales_summary");
-  const transactionBatches = activeBatches.filter((batch) => batch.datasetType === "sales_transaction");
+  const summaryBatches = activeBatches.filter((batch: UploadBatch) => batch.datasetType === "sales_summary");
+  const transactionBatches = activeBatches.filter(
+    (batch: UploadBatch) => batch.datasetType === "sales_transaction",
+  );
 
   const trendMap = new Map<string, TrendPoint>();
 
   for (const batch of summaryBatches) {
     const label = batch.periodStart && batch.periodEnd ? `${batch.periodStart} → ${batch.periodEnd}` : batch.filename;
-    const rowTotals = db
+    const rowTotals = await db
       .select({
         qty: sql<number>`coalesce(sum(${salesSummaryRecords.qtySold}), 0)`,
         sales: sql<number>`coalesce(sum(coalesce(${salesSummaryRecords.netSales}, ${salesSummaryRecords.grossSales})), 0)`,
@@ -721,10 +794,10 @@ export function getDashboardCharts() {
   }
 
   if (transactionBatches.length > 0) {
-    const rows = db
+    const rows = await db
       .select()
       .from(salesTransactionRecords)
-      .where(inArray(salesTransactionRecords.batchId, transactionBatches.map((batch) => batch.id)))
+      .where(inArray(salesTransactionRecords.batchId, transactionBatches.map((batch: UploadBatch) => batch.id)))
       .all();
 
     const grouped = new Map<string, TrendPoint>();
@@ -761,18 +834,24 @@ export function getDashboardCharts() {
   };
 }
 
-export function listInventory(filters: ListFilters) {
-  return buildFilteredItems(filters);
+export async function listInventory(filters: ListFilters) {
+  await ensureRuntimeReady();
+  return buildFilteredItems(filters, await readAnalysisItems());
 }
 
-export function listPurchaseRecommendations(filters: ListFilters) {
-  return buildFilteredItems({ ...filters, sortBy: filters.sortBy ?? "priorityScore" }, readAnalysisItems().filter((item) => item.purchasePriority !== "Low" || item.qtyTotal > 0));
+export async function listPurchaseRecommendations(filters: ListFilters) {
+  await ensureRuntimeReady();
+  const items = (await readAnalysisItems()).filter(
+    (item) => item.purchasePriority !== "Low" || item.qtyTotal > 0,
+  );
+  return buildFilteredItems({ ...filters, sortBy: filters.sortBy ?? "priorityScore" }, items);
 }
 
-export function listSlowMoving(filters: ListFilters) {
+export async function listSlowMoving(filters: ListFilters) {
+  await ensureRuntimeReady();
   return buildFilteredItems(
     { ...filters, sortBy: filters.sortBy ?? "coverageDays" },
-    readAnalysisItems().filter(
+    (await readAnalysisItems()).filter(
       (item) =>
         item.movementClass === "Slow Moving" ||
         item.movementClass === "Dead Moving" ||
@@ -781,29 +860,30 @@ export function listSlowMoving(filters: ListFilters) {
   );
 }
 
-export function getItemDetail(itemCode: string) {
-  const item = db.select().from(analysisItems).where(eq(analysisItems.itemCode, itemCode)).get();
+export async function getItemDetail(itemCode: string) {
+  await ensureRuntimeReady();
+  const item = await db.select().from(analysisItems).where(eq(analysisItems.itemCode, itemCode)).get();
   if (!item) throw new Error("Barang tidak ditemukan.");
 
-  const summaryRows = db
+  const summaryRows = (await db
     .select()
     .from(salesSummaryRecords)
     .where(eq(salesSummaryRecords.itemCode, itemCode))
-    .all()
-    .map((row) => ({
+    .all())
+    .map((row: any) => ({
       label: `${row.periodStart} → ${row.periodEnd}`,
       qty: round(row.qtySold),
       sales: round(row.netSales ?? row.grossSales ?? 0),
       type: "summary" as const,
     }));
 
-  const transactionRows = db
+  const transactionRows = (await db
     .select()
     .from(salesTransactionRecords)
     .where(eq(salesTransactionRecords.itemCode, itemCode))
     .orderBy(asc(salesTransactionRecords.saleDate))
-    .all()
-    .map((row) => ({
+    .all())
+    .map((row: any) => ({
       label: row.saleDate,
       qty: round(row.qtySold),
       sales: round(row.netSales ?? row.grossSales ?? 0),
@@ -821,11 +901,20 @@ export function getItemDetail(itemCode: string) {
   };
 }
 
-export function getReportsPayload() {
-  const dashboard = getDashboardSummary();
-  const charts = getDashboardCharts();
-  const purchase = listPurchaseRecommendations({ pageSize: 100, sortBy: "priorityScore", sortDirection: "desc" });
-  const slowMoving = listSlowMoving({ pageSize: 100, sortBy: "coverageDays", sortDirection: "desc" });
+export async function getReportsPayload() {
+  await ensureRuntimeReady();
+  const dashboard = await getDashboardSummary();
+  const charts = await getDashboardCharts();
+  const purchase = await listPurchaseRecommendations({
+    pageSize: 100,
+    sortBy: "priorityScore",
+    sortDirection: "desc",
+  });
+  const slowMoving = await listSlowMoving({
+    pageSize: 100,
+    sortBy: "coverageDays",
+    sortDirection: "desc",
+  });
 
   return {
     summary: dashboard.summary,
@@ -835,14 +924,14 @@ export function getReportsPayload() {
   };
 }
 
-function refreshAnalysisSnapshot() {
-  const computation = computeAnalysisSnapshot();
+async function refreshAnalysisSnapshot() {
+  const computation = await computeAnalysisSnapshot();
 
-  db.delete(analysisItems).run();
-  db.delete(analysisSummary).run();
+  await db.delete(analysisItems).run();
+  await db.delete(analysisSummary).run();
 
   if (computation.items.length > 0) {
-    insertInChunks(
+    await insertInChunks(
       analysisItems,
       computation.items.map((item) => ({
         id: createId("analysis"),
@@ -872,7 +961,8 @@ function refreshAnalysisSnapshot() {
     );
   }
 
-  db.insert(analysisSummary)
+  await db
+    .insert(analysisSummary)
     .values({
       id: "current",
       refreshedAt: nowIso(),
@@ -894,8 +984,8 @@ function refreshAnalysisSnapshot() {
     .run();
 }
 
-function computeAnalysisSnapshot(): AnalysisComputation {
-  const activeMaster = db
+async function computeAnalysisSnapshot(): Promise<AnalysisComputation> {
+  const activeMaster = await db
     .select()
     .from(uploadBatches)
     .where(and(eq(uploadBatches.datasetType, "master"), eq(uploadBatches.isActive, true)))
@@ -903,33 +993,44 @@ function computeAnalysisSnapshot(): AnalysisComputation {
     .get();
 
   const masterRows = activeMaster
-    ? db.select().from(inventoryItems).where(eq(inventoryItems.batchId, activeMaster.id)).all()
+    ? await db.select().from(inventoryItems).where(eq(inventoryItems.batchId, activeMaster.id)).all()
     : [];
 
-  const activeSalesBatches = db
+  const activeSalesBatches = await db
     .select()
     .from(uploadBatches)
     .where(and(inArray(uploadBatches.datasetType, ["sales_summary", "sales_transaction"]), eq(uploadBatches.isActive, true)))
     .all();
 
-  const activeSalesSummaryBatches = activeSalesBatches.filter((batch) => batch.datasetType === "sales_summary");
-  const activeTransactionBatches = activeSalesBatches.filter((batch) => batch.datasetType === "sales_transaction");
+  const activeSalesSummaryBatches = activeSalesBatches.filter(
+    (batch: UploadBatch) => batch.datasetType === "sales_summary",
+  );
+  const activeTransactionBatches = activeSalesBatches.filter(
+    (batch: UploadBatch) => batch.datasetType === "sales_transaction",
+  );
 
   const summaryRows =
     activeSalesSummaryBatches.length > 0
-      ? db
+      ? await db
           .select()
           .from(salesSummaryRecords)
-          .where(inArray(salesSummaryRecords.batchId, activeSalesSummaryBatches.map((batch) => batch.id)))
+          .where(
+            inArray(salesSummaryRecords.batchId, activeSalesSummaryBatches.map((batch: UploadBatch) => batch.id)),
+          )
           .all()
       : [];
 
   const transactionRows =
     activeTransactionBatches.length > 0
-      ? db
+      ? await db
           .select()
           .from(salesTransactionRecords)
-          .where(inArray(salesTransactionRecords.batchId, activeTransactionBatches.map((batch) => batch.id)))
+          .where(
+            inArray(
+              salesTransactionRecords.batchId,
+              activeTransactionBatches.map((batch: UploadBatch) => batch.id),
+            ),
+          )
           .all()
       : [];
 
@@ -943,7 +1044,7 @@ function computeAnalysisSnapshot(): AnalysisComputation {
   }
 
   if (transactionRows.length > 0) {
-    const dates = transactionRows.map((row) => row.saleDate).sort();
+    const dates = transactionRows.map((row: any) => row.saleDate).sort();
     const start = dates[0];
     const end = dates.at(-1);
     if (start && end) {
@@ -1128,122 +1229,122 @@ function computeAnalysisSnapshot(): AnalysisComputation {
   };
 }
 
-function ensureDatabase() {
-  sqlite.exec(`
-    CREATE TABLE IF NOT EXISTS upload_batches (
-      id TEXT PRIMARY KEY,
-      dataset_type TEXT NOT NULL,
-      filename TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'ready',
-      is_active INTEGER NOT NULL DEFAULT 0,
-      uploaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      row_count INTEGER NOT NULL DEFAULT 0,
-      period_start TEXT,
-      period_end TEXT,
-      mapping_json TEXT NOT NULL DEFAULT '{}',
-      validation_summary_json TEXT NOT NULL DEFAULT '{}'
-    );
+const SCHEMA_STATEMENTS = [
+  `CREATE TABLE IF NOT EXISTS upload_batches (
+    id TEXT PRIMARY KEY,
+    dataset_type TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ready',
+    is_active INTEGER NOT NULL DEFAULT 0,
+    uploaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    row_count INTEGER NOT NULL DEFAULT 0,
+    period_start TEXT,
+    period_end TEXT,
+    mapping_json TEXT NOT NULL DEFAULT '{}',
+    validation_summary_json TEXT NOT NULL DEFAULT '{}'
+  )`,
+  `CREATE TABLE IF NOT EXISTS inventory_items (
+    id TEXT PRIMARY KEY,
+    batch_id TEXT NOT NULL,
+    item_code TEXT NOT NULL,
+    item_name TEXT NOT NULL,
+    category TEXT,
+    brand TEXT,
+    description TEXT,
+    variant TEXT,
+    selling_price REAL,
+    base_price REAL,
+    current_stock REAL NOT NULL DEFAULT 0,
+    minimum_stock REAL,
+    FOREIGN KEY(batch_id) REFERENCES upload_batches(id) ON DELETE CASCADE
+  )`,
+  `CREATE TABLE IF NOT EXISTS sales_transaction_records (
+    id TEXT PRIMARY KEY,
+    batch_id TEXT NOT NULL,
+    sale_date TEXT NOT NULL,
+    transaction_id TEXT,
+    item_code TEXT NOT NULL,
+    item_name TEXT NOT NULL,
+    category TEXT,
+    brand TEXT,
+    qty_sold REAL NOT NULL DEFAULT 0,
+    gross_sales REAL,
+    net_sales REAL,
+    FOREIGN KEY(batch_id) REFERENCES upload_batches(id) ON DELETE CASCADE
+  )`,
+  `CREATE TABLE IF NOT EXISTS sales_summary_records (
+    id TEXT PRIMARY KEY,
+    batch_id TEXT NOT NULL,
+    period_start TEXT NOT NULL,
+    period_end TEXT NOT NULL,
+    item_code TEXT NOT NULL,
+    item_name TEXT NOT NULL,
+    category TEXT,
+    qty_sold REAL NOT NULL DEFAULT 0,
+    gross_sales REAL,
+    service_fee REAL,
+    taxes REAL,
+    net_sales REAL,
+    FOREIGN KEY(batch_id) REFERENCES upload_batches(id) ON DELETE CASCADE
+  )`,
+  `CREATE TABLE IF NOT EXISTS analysis_items (
+    id TEXT PRIMARY KEY,
+    item_code TEXT NOT NULL,
+    item_name TEXT NOT NULL,
+    category TEXT,
+    brand TEXT,
+    current_stock REAL NOT NULL DEFAULT 0,
+    minimum_stock REAL,
+    base_price REAL,
+    qty_total REAL NOT NULL DEFAULT 0,
+    sales_value_total REAL NOT NULL DEFAULT 0,
+    period_days INTEGER NOT NULL DEFAULT 0,
+    period_count INTEGER NOT NULL DEFAULT 0,
+    frequency_score REAL NOT NULL DEFAULT 0,
+    avg_monthly_sales REAL NOT NULL DEFAULT 0,
+    avg_daily_sales REAL NOT NULL DEFAULT 0,
+    coverage_days INTEGER,
+    stock_status TEXT NOT NULL,
+    movement_class TEXT NOT NULL,
+    purchase_priority TEXT NOT NULL,
+    recommended_order_qty REAL NOT NULL DEFAULT 0,
+    priority_score REAL NOT NULL DEFAULT 0,
+    reason_json TEXT NOT NULL DEFAULT '[]',
+    dead_stock_flag INTEGER NOT NULL DEFAULT 0
+  )`,
+  `CREATE TABLE IF NOT EXISTS analysis_summary (
+    id TEXT PRIMARY KEY,
+    refreshed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    total_items INTEGER NOT NULL DEFAULT 0,
+    total_out_of_stock INTEGER NOT NULL DEFAULT 0,
+    total_low_stock INTEGER NOT NULL DEFAULT 0,
+    total_fast_moving INTEGER NOT NULL DEFAULT 0,
+    total_slow_moving INTEGER NOT NULL DEFAULT 0,
+    total_dead_moving INTEGER NOT NULL DEFAULT 0,
+    total_priority_buy INTEGER NOT NULL DEFAULT 0,
+    estimated_restock_value REAL NOT NULL DEFAULT 0,
+    has_partial_costing INTEGER NOT NULL DEFAULT 0,
+    coverage_start TEXT,
+    coverage_end TEXT,
+    coverage_days INTEGER NOT NULL DEFAULT 0,
+    stock_distribution_json TEXT NOT NULL DEFAULT '[]',
+    movement_distribution_json TEXT NOT NULL DEFAULT '[]'
+  )`,
+];
 
-    CREATE TABLE IF NOT EXISTS inventory_items (
-      id TEXT PRIMARY KEY,
-      batch_id TEXT NOT NULL,
-      item_code TEXT NOT NULL,
-      item_name TEXT NOT NULL,
-      category TEXT,
-      brand TEXT,
-      description TEXT,
-      variant TEXT,
-      selling_price REAL,
-      base_price REAL,
-      current_stock REAL NOT NULL DEFAULT 0,
-      minimum_stock REAL,
-      FOREIGN KEY(batch_id) REFERENCES upload_batches(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS sales_transaction_records (
-      id TEXT PRIMARY KEY,
-      batch_id TEXT NOT NULL,
-      sale_date TEXT NOT NULL,
-      transaction_id TEXT,
-      item_code TEXT NOT NULL,
-      item_name TEXT NOT NULL,
-      category TEXT,
-      brand TEXT,
-      qty_sold REAL NOT NULL DEFAULT 0,
-      gross_sales REAL,
-      net_sales REAL,
-      FOREIGN KEY(batch_id) REFERENCES upload_batches(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS sales_summary_records (
-      id TEXT PRIMARY KEY,
-      batch_id TEXT NOT NULL,
-      period_start TEXT NOT NULL,
-      period_end TEXT NOT NULL,
-      item_code TEXT NOT NULL,
-      item_name TEXT NOT NULL,
-      category TEXT,
-      qty_sold REAL NOT NULL DEFAULT 0,
-      gross_sales REAL,
-      service_fee REAL,
-      taxes REAL,
-      net_sales REAL,
-      FOREIGN KEY(batch_id) REFERENCES upload_batches(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS analysis_items (
-      id TEXT PRIMARY KEY,
-      item_code TEXT NOT NULL,
-      item_name TEXT NOT NULL,
-      category TEXT,
-      brand TEXT,
-      current_stock REAL NOT NULL DEFAULT 0,
-      minimum_stock REAL,
-      base_price REAL,
-      qty_total REAL NOT NULL DEFAULT 0,
-      sales_value_total REAL NOT NULL DEFAULT 0,
-      period_days INTEGER NOT NULL DEFAULT 0,
-      period_count INTEGER NOT NULL DEFAULT 0,
-      frequency_score REAL NOT NULL DEFAULT 0,
-      avg_monthly_sales REAL NOT NULL DEFAULT 0,
-      avg_daily_sales REAL NOT NULL DEFAULT 0,
-      coverage_days INTEGER,
-      stock_status TEXT NOT NULL,
-      movement_class TEXT NOT NULL,
-      purchase_priority TEXT NOT NULL,
-      recommended_order_qty REAL NOT NULL DEFAULT 0,
-      priority_score REAL NOT NULL DEFAULT 0,
-      reason_json TEXT NOT NULL DEFAULT '[]',
-      dead_stock_flag INTEGER NOT NULL DEFAULT 0
-    );
-
-    CREATE TABLE IF NOT EXISTS analysis_summary (
-      id TEXT PRIMARY KEY,
-      refreshed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      total_items INTEGER NOT NULL DEFAULT 0,
-      total_out_of_stock INTEGER NOT NULL DEFAULT 0,
-      total_low_stock INTEGER NOT NULL DEFAULT 0,
-      total_fast_moving INTEGER NOT NULL DEFAULT 0,
-      total_slow_moving INTEGER NOT NULL DEFAULT 0,
-      total_dead_moving INTEGER NOT NULL DEFAULT 0,
-      total_priority_buy INTEGER NOT NULL DEFAULT 0,
-      estimated_restock_value REAL NOT NULL DEFAULT 0,
-      has_partial_costing INTEGER NOT NULL DEFAULT 0,
-      coverage_start TEXT,
-      coverage_end TEXT,
-      coverage_days INTEGER NOT NULL DEFAULT 0,
-      stock_distribution_json TEXT NOT NULL DEFAULT '[]',
-      movement_distribution_json TEXT NOT NULL DEFAULT '[]'
-    );
-  `);
+async function ensureDatabase() {
+  for (const statement of SCHEMA_STATEMENTS) {
+    await db.run(sql.raw(statement));
+  }
 }
 
-function seedDemoDataIfEmpty() {
-  const existing = db.select({ count: sql<number>`count(*)` }).from(uploadBatches).get();
+async function seedDemoDataIfEmpty() {
+  const existing = await db.select({ count: sql<number>`count(*)` }).from(uploadBatches).get();
   if ((existing?.count ?? 0) > 0) return;
 
   const masterBatchId = createId("demo_master");
-  db.insert(uploadBatches)
+  await db
+    .insert(uploadBatches)
     .values({
       id: masterBatchId,
       datasetType: "master",
@@ -1257,7 +1358,8 @@ function seedDemoDataIfEmpty() {
     })
     .run();
 
-  db.insert(inventoryItems)
+  await db
+    .insert(inventoryItems)
     .values(
       demoInventoryItems.map((item) => ({
         id: createId("demo_inventory"),
@@ -1278,7 +1380,8 @@ function seedDemoDataIfEmpty() {
 
   for (const batch of demoSummaryBatches) {
     const batchId = createId("demo_sales_summary");
-    db.insert(uploadBatches)
+    await db
+      .insert(uploadBatches)
       .values({
         id: batchId,
         datasetType: "sales_summary",
@@ -1294,7 +1397,8 @@ function seedDemoDataIfEmpty() {
       })
       .run();
 
-    db.insert(salesSummaryRecords)
+    await db
+      .insert(salesSummaryRecords)
       .values(
         batch.rows.map((row) => ({
           id: createId("demo_summary_row"),
@@ -1315,7 +1419,8 @@ function seedDemoDataIfEmpty() {
   }
 
   const txBatchId = createId("demo_sales_transaction");
-  db.insert(uploadBatches)
+  await db
+    .insert(uploadBatches)
     .values({
       id: txBatchId,
       datasetType: "sales_transaction",
@@ -1331,7 +1436,8 @@ function seedDemoDataIfEmpty() {
     })
     .run();
 
-  db.insert(salesTransactionRecords)
+  await db
+    .insert(salesTransactionRecords)
     .values(
       demoTransactionRecords.map((row) => ({
         id: createId("demo_transaction_row"),
@@ -1349,7 +1455,3 @@ function seedDemoDataIfEmpty() {
     )
     .run();
 }
-
-ensureDatabase();
-seedDemoDataIfEmpty();
-refreshAnalysisSnapshot();

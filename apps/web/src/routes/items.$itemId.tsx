@@ -85,7 +85,7 @@ function ItemDetailPage() {
                     {isId ? "Alasan analisis" : "Analysis reasons"}
                   </p>
                   <ul className="space-y-2 text-sm text-slate-700 dark:text-slate-200">
-                    {item.reasons.map((reason) => (
+                    {item.reasons.map((reason: string) => (
                       <li key={reason}>• {reason}</li>
                     ))}
                   </ul>

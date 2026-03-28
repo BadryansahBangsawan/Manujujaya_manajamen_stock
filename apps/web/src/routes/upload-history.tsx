@@ -33,11 +33,13 @@ function UploadHistoryPage() {
 
   React.useEffect(() => {
     if (batches.length === 0) return;
-    setMasterBatchId(batches.find((batch) => batch.datasetType === "master" && batch.isActive)?.id ?? null);
+    setMasterBatchId(
+      batches.find((batch: any) => batch.datasetType === "master" && batch.isActive)?.id ?? null,
+    );
     setSalesBatchIds(
       batches
-        .filter((batch) => batch.datasetType !== "master" && batch.isActive)
-        .map((batch) => batch.id),
+        .filter((batch: any) => batch.datasetType !== "master" && batch.isActive)
+        .map((batch: any) => batch.id),
     );
   }, [batches]);
 
@@ -62,8 +64,8 @@ function UploadHistoryPage() {
     onError: (error) => toast.error(error.message),
   });
 
-  const masterBatches = batches.filter((batch) => batch.datasetType === "master");
-  const salesBatches = batches.filter((batch) => batch.datasetType !== "master");
+  const masterBatches = batches.filter((batch: any) => batch.datasetType === "master");
+  const salesBatches = batches.filter((batch: any) => batch.datasetType !== "master");
 
   return (
     <div ref={revealRef} className="space-y-8">

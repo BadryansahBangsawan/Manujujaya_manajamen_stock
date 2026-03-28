@@ -1,5 +1,6 @@
 import { createContext } from "@Manujujaya-Manajemen-stock/api/context";
 import { appRouter } from "@Manujujaya-Manajemen-stock/api/routers/index";
+import { configureDatabase } from "@Manujujaya-Manajemen-stock/db";
 import { env } from "@Manujujaya-Manajemen-stock/env/server";
 import { OpenAPIHandler } from "@orpc/openapi/node";
 import { OpenAPIReferencePlugin } from "@orpc/openapi/plugins";
@@ -8,6 +9,8 @@ import { RPCHandler } from "@orpc/server/node";
 import { ZodToJsonSchemaConverter } from "@orpc/zod/zod4";
 import cors from "cors";
 import express from "express";
+
+configureDatabase({ databaseUrl: env.DATABASE_URL });
 
 const app = express();
 const configuredOrigins = env.CORS_ORIGIN.split(",")
