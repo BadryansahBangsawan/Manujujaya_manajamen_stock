@@ -38,8 +38,8 @@ function ItemDetailPage() {
         title={item?.itemName ?? itemId}
         description={
           isId
-            ? "Lihat posisi stok saat ini, riwayat penjualan, klasifikasi pergerakan, dan alasan rekomendasi pembelian untuk item yang dipilih."
-            : "View current stock, sales history, movement classification, and recommendation reasons for selected item."
+            ? "Lihat posisi stok saat ini, riwayat penjualan, klasifikasi keterjualan, dan alasan rekomendasi pembelian untuk item yang dipilih."
+            : "View current stock, sales history, selling-speed classification, and recommendation reasons for selected item."
         }
       />
 

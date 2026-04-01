@@ -69,7 +69,7 @@ function HighPriorityStockPage() {
       cell: ({ row }) => <StockStatusBadge status={row.original.stockStatus} />,
     },
     {
-      header: "Movement",
+      header: isId ? "Keterjualan" : "Selling speed",
       cell: ({ row }) => <MovementBadge movement={row.original.movementClass} />,
     },
     {

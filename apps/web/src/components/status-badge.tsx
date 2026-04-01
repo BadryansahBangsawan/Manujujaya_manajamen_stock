@@ -33,13 +33,13 @@ export function MovementBadge({
   const { language } = useLanguage();
 
   const normalized =
-    movement === "Cepat Bergerak"
+    movement === "Cepat Bergerak" || movement === "Cepat Terjual" || movement === "Fast Selling"
       ? "Fast Moving"
-      : movement === "Sedang Bergerak"
+      : movement === "Sedang Bergerak" || movement === "Sedang Terjual" || movement === "Medium Selling"
         ? "Medium Moving"
-        : movement === "Lambat Bergerak"
+        : movement === "Lambat Bergerak" || movement === "Lambat Terjual" || movement === "Slow Selling"
           ? "Slow Moving"
-          : movement === "Tidak Bergerak"
+          : movement === "Tidak Bergerak" || movement === "Tidak Terjual" || movement === "Not Selling"
             ? "Dead Moving"
             : movement;
   const variant =
@@ -54,13 +54,19 @@ export function MovementBadge({
   const label =
     language === "id"
       ? normalized === "Fast Moving"
-        ? "Cepat Bergerak"
+        ? "Cepat Terjual"
         : normalized === "Medium Moving"
-          ? "Sedang Bergerak"
+          ? "Sedang Terjual"
           : normalized === "Dead Moving"
-            ? "Tidak Bergerak"
-            : "Lambat Bergerak"
-      : normalized;
+            ? "Tidak Terjual"
+            : "Lambat Terjual"
+      : normalized === "Fast Moving"
+        ? "Fast Selling"
+        : normalized === "Medium Moving"
+          ? "Medium Selling"
+          : normalized === "Dead Moving"
+            ? "Not Selling"
+            : "Slow Selling";
 
   return <Badge variant={variant}>{label}</Badge>;
 }

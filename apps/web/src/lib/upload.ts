@@ -59,5 +59,6 @@ export async function parseSpreadsheet(file: File) {
     headers,
     rows: cleanedRows,
     metadataLines,
+    totalRows: cleanedRows.length,
   };
 }

@@ -29,8 +29,8 @@ function ReportsPage() {
         title={isId ? "Keluarkan snapshot analitik aktif ke Excel atau PDF" : "Export active analytics snapshot to Excel or PDF"}
         description={
           isId
-            ? "Gunakan export untuk berbagi rekomendasi pembelian, stok kritis, dan barang slow moving ke tim operasional."
-            : "Use export to share purchase recommendations, critical stock, and slow-moving items with operations team."
+            ? "Gunakan export untuk berbagi rekomendasi pembelian, stok kritis, dan barang lambat/tidak terjual ke tim operasional."
+            : "Use export to share purchase recommendations, critical stock, and slow/non-selling items with operations team."
         }
         coverage={formatDateRange(payload?.summary?.coverageStart, payload?.summary?.coverageEnd)}
       />
@@ -79,9 +79,9 @@ function ReportsPage() {
             caption={isId ? "Item yang perlu ditindak" : "Items requiring action"}
           />
           <InfoCard
-            title="Slow / dead moving"
+            title={isId ? "Lambat / tidak terjual" : "Slow / not selling"}
             value={formatNumber((payload?.summary?.totalSlowMoving ?? 0) + (payload?.summary?.totalDeadMoving ?? 0))}
-            caption={isId ? "Item dengan pergerakan rendah" : "Items with low movement"}
+            caption={isId ? "Item dengan keterjualan rendah" : "Items with low selling speed"}
           />
         </div>
       </section>

@@ -29,6 +29,52 @@ type UploadWorkbenchProps = {
 };
 
 type PreviewResponse = Awaited<ReturnType<typeof orpc.uploads.previewFile.call>>;
+const PREVIEW_SAMPLE_ROWS = 250;
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+const isRetryableUploadError = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes("503") ||
+    message.includes("Failed to fetch") ||
+    message.includes("Internal server error")
+  );
+};
+
+function dedupeRowsByHeader(
+  rows: Array<Record<string, unknown>>,
+  header: string | null | undefined,
+) {
+  if (!header) return rows;
+  const deduped = new Map<string, Record<string, unknown>>();
+  for (const row of rows) {
+    const key = String(row[header] ?? "").trim();
+    if (!key) continue;
+    deduped.set(key, row);
+  }
+  return Array.from(deduped.values());
+}
+
+function compactRowsByMapping(
+  rows: Array<Record<string, unknown>>,
+  mapping: Record<string, string | null | undefined>,
+) {
+  const selectedHeaders = Array.from(
+    new Set(
+      Object.values(mapping)
+        .filter((header): header is string => typeof header === "string" && header.length > 0),
+    ),
+  );
+  if (selectedHeaders.length === 0) return rows;
+
+  return rows.map((row) => {
+    const compacted: Record<string, unknown> = {};
+    for (const header of selectedHeaders) {
+      compacted[header] = row[header] ?? null;
+    }
+    return compacted;
+  });
+}
 
 export function UploadWorkbench({ datasetType, title, description }: UploadWorkbenchProps) {
   const { language } = useLanguage();
@@ -39,11 +85,13 @@ export function UploadWorkbench({ datasetType, title, description }: UploadWorkb
   const [mapping, setMapping] = React.useState<Record<string, string | null>>({});
   const [periodStart, setPeriodStart] = React.useState("");
   const [periodEnd, setPeriodEnd] = React.useState("");
+  const [uploadProgress, setUploadProgress] = React.useState<number | null>(null);
 
   const previewMutation = useMutation({
     mutationFn: (input: Parameters<typeof orpc.uploads.previewFile.call>[0]) =>
       orpc.uploads.previewFile.call(input),
     onSuccess: (result) => {
+      setUploadProgress(null);
       setPreview(result);
       setMapping(
         Object.fromEntries(
@@ -64,26 +112,180 @@ export function UploadWorkbench({ datasetType, title, description }: UploadWorkb
   const commitMutation = useMutation({
     mutationFn: async () => {
       if (!payload || !preview) throw new Error("Belum ada file yang dipreview.");
+      let startedBatchId: string | null = null;
       const isMasterAutoMapping = preview.detectedDatasetType === "master";
-      const request = {
-        ...payload,
-        datasetType,
-        mapping: isMasterAutoMapping ? preview.suggestedMapping : mapping,
-        periodStart: periodStart || null,
-        periodEnd: periodEnd || null,
-      };
+      const mappedFields = isMasterAutoMapping ? preview.suggestedMapping : mapping;
 
-      if (preview.detectedDatasetType === "master") return orpc.uploads.commitMaster.call(request);
-      if (preview.detectedDatasetType === "sales_transaction") {
-        return orpc.uploads.commitSalesTransaction.call(request);
+      try {
+        if (preview.detectedDatasetType === "master") {
+          const uniqueMasterRows = dedupeRowsByHeader(payload.rows, mappedFields.item_code);
+          const preparedMasterRows = compactRowsByMapping(uniqueMasterRows, mappedFields);
+          const started = await orpc.uploads.startMasterImport.call({
+            fileName: payload.fileName,
+            rowCount: preparedMasterRows.length,
+            mapping: mappedFields,
+          });
+          startedBatchId = started.batchId;
+
+          const totalRows = Math.max(preparedMasterRows.length, 1);
+          let chunkSize = 300;
+          const minimumChunkSize = 20;
+          let processed = 0;
+          setUploadProgress(0);
+
+          const appendChunkWithRetry = async (
+            rowsChunk: Array<Record<string, unknown>>,
+            attempt = 0,
+          ): Promise<void> => {
+            try {
+              await orpc.uploads.appendMasterChunk.call({
+                batchId: started.batchId,
+                rows: rowsChunk,
+                mapping: mappedFields,
+              });
+            } catch (error) {
+              const isRetryable = isRetryableUploadError(error);
+
+              if (isRetryable && rowsChunk.length > 20) {
+                const middle = Math.ceil(rowsChunk.length / 2);
+                await appendChunkWithRetry(rowsChunk.slice(0, middle), attempt);
+                await appendChunkWithRetry(rowsChunk.slice(middle), attempt);
+                return;
+              }
+
+              if (isRetryable && attempt < 5) {
+                await sleep(700 * (attempt + 1));
+                await appendChunkWithRetry(rowsChunk, attempt + 1);
+                return;
+              }
+
+              throw error;
+            }
+          };
+
+          for (let index = 0; index < preparedMasterRows.length; ) {
+            const rowsChunk = preparedMasterRows.slice(index, index + chunkSize);
+            try {
+              await appendChunkWithRetry(rowsChunk);
+              index += rowsChunk.length;
+              processed += rowsChunk.length;
+              setUploadProgress(Math.min(100, Math.round((processed / totalRows) * 100)));
+              await sleep(80);
+            } catch (error) {
+              if (isRetryableUploadError(error) && chunkSize > minimumChunkSize) {
+                chunkSize = Math.max(minimumChunkSize, Math.floor(chunkSize / 2));
+                continue;
+              }
+              throw error;
+            }
+          }
+
+          const finalized = await orpc.uploads.finalizeMasterImport.call({ batchId: started.batchId });
+          startedBatchId = null;
+          return finalized;
+        }
+
+        if (preview.detectedDatasetType === "sales_summary") {
+          if (!periodStart || !periodEnd) {
+            throw new Error("Period start dan period end wajib diisi untuk sales summary.");
+          }
+
+          const preparedSalesRows = compactRowsByMapping(payload.rows, mappedFields);
+          const started = await orpc.uploads.startSalesSummaryImport.call({
+            fileName: payload.fileName,
+            rowCount: preparedSalesRows.length,
+            mapping: mappedFields,
+            periodStart,
+            periodEnd,
+          });
+          startedBatchId = started.batchId;
+
+          const totalRows = Math.max(preparedSalesRows.length, 1);
+          let chunkSize = 200;
+          const minimumChunkSize = 20;
+          let processed = 0;
+          setUploadProgress(0);
+
+          const appendSalesChunkWithRetry = async (
+            rowsChunk: Array<Record<string, unknown>>,
+            attempt = 0,
+          ): Promise<void> => {
+            try {
+              await orpc.uploads.appendSalesSummaryChunk.call({
+                batchId: started.batchId,
+                rows: rowsChunk,
+                mapping: mappedFields,
+              });
+            } catch (error) {
+              const isRetryable = isRetryableUploadError(error);
+
+              if (isRetryable && rowsChunk.length > 20) {
+                const middle = Math.ceil(rowsChunk.length / 2);
+                await appendSalesChunkWithRetry(rowsChunk.slice(0, middle), attempt);
+                await appendSalesChunkWithRetry(rowsChunk.slice(middle), attempt);
+                return;
+              }
+
+              if (isRetryable && attempt < 5) {
+                await sleep(700 * (attempt + 1));
+                await appendSalesChunkWithRetry(rowsChunk, attempt + 1);
+                return;
+              }
+
+              throw error;
+            }
+          };
+
+          for (let index = 0; index < preparedSalesRows.length; ) {
+            const rowsChunk = preparedSalesRows.slice(index, index + chunkSize);
+            try {
+              await appendSalesChunkWithRetry(rowsChunk);
+              index += rowsChunk.length;
+              processed += rowsChunk.length;
+              setUploadProgress(Math.min(100, Math.round((processed / totalRows) * 100)));
+              await sleep(60);
+            } catch (error) {
+              if (isRetryableUploadError(error) && chunkSize > minimumChunkSize) {
+                chunkSize = Math.max(minimumChunkSize, Math.floor(chunkSize / 2));
+                continue;
+              }
+              throw error;
+            }
+          }
+
+          const finalized = await orpc.uploads.finalizeSalesSummaryImport.call({ batchId: started.batchId });
+          startedBatchId = null;
+          return finalized;
+        }
+
+        const request = {
+          ...payload,
+          datasetType,
+          mapping: mappedFields,
+          periodStart: periodStart || null,
+          periodEnd: periodEnd || null,
+        };
+
+        if (preview.detectedDatasetType === "sales_transaction") {
+          return orpc.uploads.commitSalesTransaction.call(request);
+        }
+        return orpc.uploads.commitSalesSummary.call(request);
+      } catch (error) {
+        if (startedBatchId) {
+          await orpc.uploads.deleteBatch
+            .call({ batchId: startedBatchId })
+            .catch(() => {});
+        }
+        throw error;
       }
-      return orpc.uploads.commitSalesSummary.call(request);
     },
     onSuccess: async () => {
+      setUploadProgress(null);
       toast.success(isId ? "Data berhasil diimpor." : "Data imported successfully.");
-      await queryClient.invalidateQueries();
+      await queryClient.invalidateQueries({ refetchType: "none" });
     },
     onError: (error) => {
+      setUploadProgress(null);
       const message = error.message.includes("Failed to fetch")
         ? "Gagal mengirim data ke server. Cek koneksi backend/CORS lalu coba lagi."
         : error.message;
@@ -93,13 +295,27 @@ export function UploadWorkbench({ datasetType, title, description }: UploadWorkb
 
   async function handleFileChange(file: File | null) {
     if (!file) return;
+    setUploadProgress(null);
     const parsed = await parseSpreadsheet(file);
     setPayload(parsed);
-    await previewMutation.mutateAsync({ ...parsed, datasetType });
+    await previewMutation.mutateAsync({
+      ...parsed,
+      rows: parsed.rows.slice(0, PREVIEW_SAMPLE_ROWS),
+      datasetType,
+      totalRows: parsed.totalRows ?? parsed.rows.length,
+    });
   }
 
   const headerOptions = payload?.headers ?? [];
   const isMasterAutoMapping = preview?.detectedDatasetType === "master";
+  const progressLabel =
+    preview?.detectedDatasetType === "master"
+      ? isId
+        ? "Progress upload master"
+        : "Master upload progress"
+      : isId
+        ? "Progress upload sales"
+        : "Sales upload progress";
 
   return (
     <Card
@@ -249,6 +465,19 @@ export function UploadWorkbench({ datasetType, title, description }: UploadWorkb
                   ? isId ? "Mengimpor..." : "Importing..."
                   : isId ? "Simpan ke snapshot aktif" : "Save to active snapshot"}
               </Button>
+              {uploadProgress != null && commitMutation.isPending ? (
+                <div className="space-y-2">
+                  <p className="text-xs text-slate-600 dark:text-slate-300">
+                    {progressLabel}: {uploadProgress}%
+                  </p>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+                    <div
+                      className="h-full rounded-full bg-[#353535] transition-[width] duration-300"
+                      style={{ width: `${uploadProgress}%` }}
+                    />
+                  </div>
+                </div>
+              ) : null}
             </div>
 
             <div className="space-y-4">

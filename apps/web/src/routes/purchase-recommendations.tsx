@@ -67,7 +67,7 @@ function PurchaseRecommendationsPage() {
       ),
     },
     {
-      header: "Movement",
+      header: isId ? "Keterjualan" : "Selling speed",
       cell: ({ row }) => <MovementBadge movement={row.original.movementClass} />,
     },
     {
@@ -101,13 +101,13 @@ function PurchaseRecommendationsPage() {
         eyebrow={isId ? "Prioritas Beli" : "Buy Priority"}
         title={
           isId
-            ? "Rank rekomendasi pembelian yang menggabungkan stok, demand, dan perputaran"
-            : "Purchase recommendation ranking based on stock, demand, and movement"
+            ? "Rank rekomendasi pembelian yang menggabungkan stok, demand, dan tingkat keterjualan"
+            : "Purchase recommendation ranking based on stock, demand, and selling speed"
         }
         description={
           isId
-            ? "Fokuskan modal ke item paling berisiko habis sekaligus paling sering bergerak pada coverage aktif."
-            : "Focus capital on items with highest stock-out risk and strongest movement in active coverage."
+            ? "Fokuskan modal ke item paling berisiko habis sekaligus paling cepat terjual pada coverage aktif."
+            : "Focus capital on items with highest stock-out risk and strongest selling speed in active coverage."
         }
       />
 

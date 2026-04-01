@@ -118,14 +118,14 @@ function DashboardPage() {
           tone="warning"
         />
         <MetricCard
-          title="Fast moving"
+          title={isId ? "Cepat terjual" : "Fast selling"}
           value={formatNumber(summary.totalFastMoving)}
           caption={isId ? "Permintaan tinggi pada coverage aktif" : "High demand in active coverage"}
           icon={Flame}
           tone="success"
         />
         <MetricCard
-          title="Slow / dead"
+          title={isId ? "Lambat / tidak terjual" : "Slow / not selling"}
           value={formatNumber(summary.totalSlowMoving + summary.totalDeadMoving)}
           caption={isId ? "Terlalu lama bertahan di rak" : "Staying too long on shelf"}
           icon={TrendingDown}
@@ -186,8 +186,8 @@ function DashboardPage() {
             </div>
           </ChartPanel>
           <ChartPanel
-            title="Fast / medium / slow / dead"
-            description={isId ? "Klasifikasi pergerakan barang pada coverage aktif" : "Movement classification in active coverage"}
+            title={isId ? "Cepat / sedang / lambat / tidak terjual" : "Fast / medium / slow / not selling"}
+            description={isId ? "Klasifikasi tingkat keterjualan pada coverage aktif" : "Selling-speed classification in active coverage"}
           >
             <div className="h-52">
               <ResponsiveContainer width="100%" height="100%">
@@ -253,8 +253,8 @@ function DashboardPage() {
                 <AlertTitle>{isId ? "Tidak ada alert prioritas tinggi" : "No high-priority alerts"}</AlertTitle>
                 <AlertDescription>
                   {isId
-                    ? "Snapshot aktif saat ini relatif aman untuk item fast moving."
-                    : "Current active snapshot is relatively safe for fast moving items."}
+                    ? "Snapshot aktif saat ini relatif aman untuk item cepat terjual."
+                    : "Current active snapshot is relatively safe for fast-selling items."}
                 </AlertDescription>
               </Alert>
             ) : (

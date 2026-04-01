@@ -102,45 +102,59 @@ function withCors(response: Response, corsHeaders: Headers) {
 
 export default {
   async fetch(request: Request, env: WorkerEnv) {
-    if (!runtimeConfigured) {
-      configureDatabase({ d1: env.DB ?? null });
-      runtimeConfigured = true;
-    }
-
     const origin = request.headers.get("origin");
     const allowedOrigins = parseAllowedOrigins(env.CORS_ORIGIN);
     const corsHeaders = buildCorsHeaders(origin, allowedOrigins);
 
-    if (request.method === "OPTIONS") {
-      if (origin && !isOriginAllowed(origin, allowedOrigins)) {
-        return new Response("CORS blocked", { status: 403 });
+    try {
+      if (!runtimeConfigured) {
+        configureDatabase({ d1: env.DB ?? null });
+        runtimeConfigured = true;
       }
 
-      return new Response(null, {
-        status: 204,
-        headers: corsHeaders,
+      if (request.method === "OPTIONS") {
+        if (origin && !isOriginAllowed(origin, allowedOrigins)) {
+          return new Response("CORS blocked", { status: 403 });
+        }
+
+        return new Response(null, {
+          status: 204,
+          headers: corsHeaders,
+        });
+      }
+
+      const url = new URL(request.url);
+      if (url.pathname === "/") {
+        return withCors(new Response("OK", { status: 200 }), corsHeaders);
+      }
+
+      const context = await createContext({ req: request });
+
+      const rpcResult = await rpcHandler.handle(request, {
+        prefix: "/rpc",
+        context,
       });
+      if (rpcResult.matched) return withCors(rpcResult.response, corsHeaders);
+
+      const apiResult = await apiHandler.handle(request, {
+        prefix: "/api-reference",
+        context,
+      });
+      if (apiResult.matched) return withCors(apiResult.response, corsHeaders);
+
+      return withCors(new Response("Not Found", { status: 404 }), corsHeaders);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Internal Server Error";
+      console.error("Unhandled worker error:", error);
+      return withCors(
+        new Response(JSON.stringify({ error: message }), {
+          status: 500,
+          headers: {
+            "Content-Type": "application/json; charset=utf-8",
+          },
+        }),
+        corsHeaders,
+      );
     }
-
-    const url = new URL(request.url);
-    if (url.pathname === "/") {
-      return withCors(new Response("OK", { status: 200 }), corsHeaders);
-    }
-
-    const context = await createContext({ req: request });
-
-    const rpcResult = await rpcHandler.handle(request, {
-      prefix: "/rpc",
-      context,
-    });
-    if (rpcResult.matched) return withCors(rpcResult.response, corsHeaders);
-
-    const apiResult = await apiHandler.handle(request, {
-      prefix: "/api-reference",
-      context,
-    });
-    if (apiResult.matched) return withCors(apiResult.response, corsHeaders);
-
-    return withCors(new Response("Not Found", { status: 404 }), corsHeaders);
   },
 };

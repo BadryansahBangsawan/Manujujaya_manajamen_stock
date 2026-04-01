@@ -68,7 +68,7 @@ function SlowMovingPage() {
         row.original.coverageDays == null ? "-" : `${formatNumber(row.original.coverageDays)} ${isId ? "hari" : "days"}`,
     },
     {
-      header: "Movement",
+      header: isId ? "Keterjualan" : "Selling speed",
       cell: ({ row }) => <MovementBadge movement={row.original.movementClass} />,
     },
     {
@@ -80,24 +80,24 @@ function SlowMovingPage() {
   return (
     <div ref={revealRef} className="space-y-8">
       <PageHeader
-        eyebrow={isId ? "Slow Moving" : "Slow Moving"}
+        eyebrow={isId ? "Lambat Terjual" : "Slow Selling"}
         title={isId ? "Lacak item yang terlalu lama diam di rak" : "Track items staying too long on shelf"}
         description={
           isId
-            ? "Gunakan halaman ini untuk mengidentifikasi stok yang berlebih, demand yang rendah, dan barang mati yang menahan modal."
-            : "Use this page to identify overstock, low-demand items, and dead stock locking your capital."
+            ? "Gunakan halaman ini untuk mengidentifikasi stok berlebih, item lambat terjual, dan barang tidak terjual yang menahan modal."
+            : "Use this page to identify overstock, slow-selling items, and non-selling stock locking your capital."
         }
       />
 
       <section data-reveal-item className="grid gap-2 rounded-[28px] border border-slate-950/8 bg-white/80 p-5 shadow-[0_20px_80px_-45px_rgba(15,23,42,0.55)] backdrop-blur dark:border-white/8 dark:bg-[#121212]/70">
-        <Label>{isId ? "Pencarian slow / dead moving" : "Slow / dead moving search"}</Label>
+        <Label>{isId ? "Pencarian lambat / tidak terjual" : "Slow / not selling search"}</Label>
         <Input
           value={search}
           onChange={(event) => {
             setPage(1);
             setSearch(event.target.value);
           }}
-          placeholder={isId ? "Cari item dengan pergerakan rendah" : "Search low-movement items"}
+          placeholder={isId ? "Cari item dengan keterjualan rendah" : "Search low-selling items"}
         />
       </section>
 

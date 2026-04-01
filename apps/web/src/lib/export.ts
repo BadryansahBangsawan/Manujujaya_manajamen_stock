@@ -49,7 +49,7 @@ export function downloadExcelReport(payload: Awaited<ReturnType<any>>) {
 
   XLSX.utils.book_append_sheet(workbook, summarySheet, "Summary");
   XLSX.utils.book_append_sheet(workbook, purchaseSheet, "Prioritas Beli");
-  XLSX.utils.book_append_sheet(workbook, slowSheet, "Slow Moving");
+  XLSX.utils.book_append_sheet(workbook, slowSheet, "Slow Selling");
 
   XLSX.writeFile(workbook, "manujujaya-stock-report.xlsx");
 }
@@ -74,9 +74,9 @@ export function downloadPdfReport(payload: any) {
       ["Total Barang", formatNumber(payload.summary?.totalItems ?? 0)],
       ["Stok Kosong", formatNumber(payload.summary?.totalOutOfStock ?? 0)],
       ["Stok Rendah", formatNumber(payload.summary?.totalLowStock ?? 0)],
-      ["Fast Moving", formatNumber(payload.summary?.totalFastMoving ?? 0)],
-      ["Slow Moving", formatNumber(payload.summary?.totalSlowMoving ?? 0)],
-      ["Dead Moving", formatNumber(payload.summary?.totalDeadMoving ?? 0)],
+      ["Fast Selling", formatNumber(payload.summary?.totalFastMoving ?? 0)],
+      ["Slow Selling", formatNumber(payload.summary?.totalSlowMoving ?? 0)],
+      ["Not Selling", formatNumber(payload.summary?.totalDeadMoving ?? 0)],
       ["Prioritas Beli", formatNumber(payload.summary?.totalPriorityBuy ?? 0)],
     ],
   });
